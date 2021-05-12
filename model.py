@@ -65,7 +65,6 @@ class BaseModel(nn.Module):
             importance = F.softmax(torch.negative(pred) - neg_prob, dim=1)
         else:
             importance = F.softmax(torch.ones_like(pred), dim=1)
-        # weight_loss = torch.multiply(importance.detach(), torch.negative(self.mm(pred)))
         weight_loss = torch.multiply(importance.detach(), torch.negative(F.logsigmoid(pred)))
         if reduction:
             return torch.sum(weight_loss, dim=-1).mean(-1)
@@ -76,7 +75,7 @@ class BaseModel(nn.Module):
     def softmax_loss(self, pos_rat, pos_prob, neg_rat, neg_prob, reduction=False):
         idx_mtx = (pos_rat != 0).double()
         new_pos = pos_rat - torch.log(pos_prob.detach())
-        new_neg = part_rat - torch.log(neg_prob.detach())
+        new_neg = neg_rat - torch.log(neg_prob.detach())
         parts_log_sum_exp = torch.logsumexp(new_neg, dim=-1).unsqueeze(-1)
         final = torch.log( torch.exp(new_pos) + torch.exp(parts_log_sum_exp))
         if reduction is True:
@@ -90,7 +89,9 @@ class BaseMF(BaseModel):
         # assert loss_mode==0, 'Only supported pair-wise loss for MF models'
         super(BaseMF, self).__init__(num_user, num_item, dims, loss_mode)
         self._User_Embedding = nn.Embedding(self.num_user, self.dims)
+        # nn.init.normal_(self._User_Embedding.weight, mean=0, std=0.1)
         self._Item_Embedding = nn.Embedding(self.num_item, self.dims)
+        # nn.init.normal_(self._Item_Embedding.weight, mean=0, std=0.1)
 
     def forward(self, user_id, pos_id, neg_id):
         '''
@@ -108,6 +109,11 @@ class BaseMF(BaseModel):
     
     def get_item_embs(self,  eval_flag=True):
         return self._Item_Embedding.weight
+    
+    def inference(self, user_id, item_id):
+        user_emb = self._User_Embedding(user_id)
+        item_emb = self._Item_Embedding(item_id)
+        return (user_emb.unsqueeze(-2) * item_emb).sum(-1)
 
 
 class BaseMF_TS(BaseMF):

@@ -16,7 +16,7 @@ class base_sampler(nn.Module):
     def update_pool(self, user_embs, item_embs, **kwargs):
         pass
     
-    def forward(self, user_id, random_flag=False, **kwargs):
+    def forward(self, user_id, **kwargs):
         batch_size = user_id.shape[0]
         return torch.randint(0, self.num_items, size=(batch_size, self.num_neg), device=self.device), -torch.log(self.num_items * torch.ones(batch_size, self.num_neg, device=self.device))
 
@@ -34,10 +34,24 @@ class base_sampler_pop(base_sampler):
             pop_count = pop_count**0.75
         self.pop_prob = pop_count / torch.sum(pop_count)
     
-    def forward(self, user_id, random_flag=False, **kwargs):
+    def forward(self, user_id, **kwargs):
         batch_size = user_id.shape[0]
-        items = torch.multinomial(self.pop_prob.repeat(batch_size,1), self.num_neg)
-        return items, torch.log(self.pop_prob[items])
+        min_batch_size = min(1024, batch_size)
+        cnt = batch_size // min_batch_size
+        if (batch_size - cnt * min_batch_size) > 0:
+            cnt += 1
+        items = torch.zeros(batch_size, self.num_neg, dtype=torch.long, device=self.device)
+        items_prob = torch.zeros(batch_size, self.num_neg, device=self.device)
+        for c in range(cnt):
+            end_index = min((c+1)*min_batch_size, batch_size)
+            mmmm = end_index - c * min_batch_size
+            items_min_batch = torch.multinomial(self.pop_prob.repeat(mmmm,1), self.num_neg)
+            items_prob_min_batch = torch.log(self.pop_prob[items_min_batch])
+            
+            items[c * min_batch_size : end_index] = items_min_batch
+            items_prob[c * min_batch_size : end_index] = items_prob_min_batch
+
+        return items, items_prob
 
 
 
@@ -53,7 +67,6 @@ class two_pass(nn.Module):
         
         self.pool = torch.zeros(num_users, pool_size, device=device, dtype=torch.long)
 
-        # self.weigts_sample = torch.ones(self.pool_size, device=device)
     
     def sample_Q(self, user_batch):
         batch_size = user_batch.shape[0]
@@ -64,11 +77,14 @@ class two_pass(nn.Module):
         pred = (user_embs_batch.unsqueeze(1) * item_embs[neg_items]).sum(-1) - log_neg_q
         sample_weight = F.softmax(pred, dim=-1)
         idices = torch.multinomial(sample_weight, self.pool_size, replacement=True)
-        # return torch.gather(neg_items, 1, idices), torch.gather(pred, 1, idices)
         return torch.gather(neg_items, 1, idices), torch.gather(sample_weight, 1, idices)
     
     # @profile
-    def __update_pool__(self, user_batch, tmp_pool, tmp_score):
+    def __update_pool__(self, user_batch, tmp_pool, tmp_score, cover_flag=False):
+        if cover_flag is True:
+            self.pool[user_batch] = tmp_pool
+            return
+
         idx = self.pool[user_batch].sum(-1) < 1
         
         user_init = user_batch[idx]
@@ -82,7 +98,7 @@ class two_pass(nn.Module):
         candidate = torch.cat([self.pool[user_update], tmp_pool[~idx]], dim=1)
         self.pool[user_update] = torch.gather(candidate, 1, idx_k)
     
-    def update_pool(self, user_embs, item_embs, batch_size=2048, **kwargs):
+    def update_pool(self, user_embs, item_embs, batch_size=2048, cover_flag=False, **kwargs):
         num_batch = (self.num_users // batch_size) + 1
         for ii in range(num_batch):
             start_idx = ii * batch_size
@@ -92,22 +108,13 @@ class two_pass(nn.Module):
     
             neg_items, neg_q = self.sample_Q(user_batch)
             tmp_pool, tmp_score = self.re_sample(user_batch, user_embs_batch, item_embs, neg_items, neg_q)
-            self.__update_pool__(user_batch, tmp_pool, tmp_score)
+            self.__update_pool__(user_batch, tmp_pool, tmp_score, cover_flag=cover_flag)
     
     # @profile
-    def forward(self, user_id, random_flag=False, **kwargs):
+    def forward(self, user_id, **kwargs):
         batch_size = user_id.shape[0]
         candidates = self.pool[user_id]
-        
-        # idx_no_unitial = candidates.sum(-1) < 1
-        # if user_id[idx_no_unitial].shape[0] > 0 :
-        #     print(user_id[idx_no_unitial],candidates)
-        #     import pdb; pdb.set_trace()
-        #     raise ValueError('No candidate items!!!\n Please initialize the sample pool')
-        
-        # idx_k = torch.multinomial(self.weigts_sample.repeat(batch_size, 1), self.num_neg, replacement=True)
         idx_k = torch.randint(0, self.pool_size, size=(batch_size, self.num_neg), device=self.device)
-
         return torch.gather(candidates, 1, idx_k), -torch.log(self.pool_size * torch.ones(batch_size, self.num_neg, device=self.device))
 
 class two_pass_pop(two_pass):
@@ -126,15 +133,54 @@ class two_pass_pop(two_pass):
     
     def sample_Q(self, user_batch):
         batch_size = user_batch.shape[0]
-        items = torch.multinomial(self.pop_prob.repeat(batch_size,1), self.num_neg)
+        items = torch.multinomial(self.pop_prob.repeat(batch_size,1), self.sample_size)
         return items, torch.log(self.pop_prob[items])
+
+class two_pass_discount(two_pass):
+    """
+        Update the pool with time discount
+    """
+    def __init__(self, num_users, num_items, sample_size, pool_size, num_neg, device, **kwargs):
+        super().__init__(num_users, num_items, sample_size, pool_size, num_neg, device, **kwargs)
+        self.pool_cnt = torch.zeros(num_users, pool_size, device=self.device)
+    
+    def __update_pool__(self, user_batch, tmp_pool, tmp_score, cover_flag, tao=0.5):
+        if cover_flag is True:
+            self.pool[user_batch] = tmp_pool
+            self.pool_cnt[user_batch] = self.pool_cnt[user_batch].detach() + 1
+            return
+        
+        idx = self.pool[user_batch].sum(-1) < 1
+        user_init = user_batch[idx]
+        self.pool[user_init] = tmp_pool[idx]
+        self.pool_cnt[user_init] = self.pool_cnt[user_init].detach() + 1
+
+        user_update = user_batch[~idx]
+        num_user_update = user_update.shape[0]
+
+        candidates = torch.cat([self.pool[user_update], tmp_pool[~idx]], dim=1)
+        new_pool_cnt = torch.ones(num_user_update, self.pool_size, device=self.device)
+        candidate_pool_cnt = torch.cat([self.pool_cnt[user_update] + 1, new_pool_cnt], dim=1)
+
+        sample_prob = torch.exp(torch.negative(tao * candidate_pool_cnt))  #可以修改这边采样的分布
+        idx_k = torch.multinomial(sample_prob, self.pool_size, replacement=True)
+        # idx_k = torch.randint(0, 2*self.pool_size, size=(num_user_update, self.pool_size), device=self.device)
+        self.pool[user_update] = torch.gather(candidates, 1, idx_k)
+        self.pool_cnt[user_update] = torch.gather(candidate_pool_cnt, 1, idx_k).detach()
+        return 
+
 
 class two_pass_weight(two_pass):
     def __init__(self, num_users, num_items, sample_size, pool_size, num_neg, device, **kwargs):
         super(two_pass_weight, self).__init__(num_users, num_items, sample_size, pool_size, num_neg, device)
         self.pool_weight = torch.zeros(num_users, pool_size, device=device)
     
-    def __update_pool__(self, user_batch, tmp_pool, tmp_score):
+    def __update_pool__(self, user_batch, tmp_pool, tmp_score, cover_flag=False):
+        if cover_flag is True:
+            self.pool[user_batch] = tmp_pool
+            self.pool_weight[user_batch] = tmp_score.detach()
+            return
+
         idx = self.pool[user_batch].sum(-1) < 1
         
         user_init = user_batch[idx]
@@ -153,17 +199,11 @@ class two_pass_weight(two_pass):
             self.pool[user_update] = torch.gather(candidate, 1, idx_k)
             self.pool_weight[user_update] = torch.gather(candidate_weight, 1, idx_k).detach()
     
-    def forward(self, user_id, random_flag=False, **kwargs):
+    def forward(self, user_id, **kwargs):
         batch_size = user_id.shape[0]
         candidates = self.pool[user_id]
         candidates_weight = self.pool_weight[user_id]
-
-        # random
-        if random_flag:
-            idx_k = torch.randint(0, self.pool_size, size=(batch_size, self.num_neg), device=self.device)
-        else:
-        # ranking
-            idx_k = torch.multinomial(candidates_weight, self.num_neg, replacement=True)
+        idx_k = torch.randint(0, self.pool_size, size=(batch_size, self.num_neg), device=self.device)
         return torch.gather(candidates, 1, idx_k), -torch.log(torch.gather(candidates_weight, 1, idx_k))
 
 class two_pass_weight_pop(two_pass_weight):
@@ -182,10 +222,25 @@ class two_pass_weight_pop(two_pass_weight):
     def sample_Q(self, user_batch):
         batch_size = user_batch.shape[0]
         items = torch.multinomial(self.pop_prob.repeat(batch_size, 1), self.sample_size, replacement=True)
-        # return torch.randint(0, self.num_items, size=(batch_size, self.sample_size), device=self.device), -torch.log(self.num_items * torch.ones(batch_size, self.sample_size, device=self.device))
-        # import pdb; pdb.set_trace()
         return items, torch.log(self.pop_prob[items])
 
+
+class tapast(base_sampler):
+    def __init__(self, num_users, num_items, sample_size, pool_size, num_neg, device, **kwargs):
+        super().__init__(num_users, num_items, sample_size, pool_size, num_neg, device, **kwargs)
+        self.pool_size = pool_size
+        self.num_users = num_users
+
+    def update_pool(self, user_embs, item_embs, cover_flag=False, **kwargs):
+        # self.pool = torch.randint(0, self.num_items, size=(self.num_users, self.pool_size), device=self.device)
+        pass
+
+    def forward(self, user_id, model=None, **kwargs):
+        batch_size = user_id.shape[0]
+        pool = torch.randint(0, self.num_items, size=(batch_size, self.num_neg, self.pool_size), device=self.device)
+        rats = model.inference(user_id.repeat(self.num_neg, 1).T, pool)
+        r_v, r_idx = rats.max(dim=-1)
+        return r_idx, torch.exp(r_v)
 
 
 

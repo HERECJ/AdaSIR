@@ -4,9 +4,8 @@ import torch.nn.functional as F
 import torch.optim
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader
-# from two_pass_sampler import two_phrases_sampler
-from sampler import base_sampler, two_pass, two_pass_weight, two_pass_weight_pop, base_sampler_pop, two_pass_pop
-from model import BaseMF, BaseModel
+from sampler import base_sampler, two_pass, two_pass_weight, base_sampler_pop, two_pass_pop, two_pass_weight_pop, tapast, two_pass_discount
+from model import BaseMF, BaseMF_TS
 from dataloader import RecData, UserItemData
 import argparse
 import numpy as np
@@ -16,8 +15,6 @@ import logging
 import scipy as sp
 import scipy.io
 import datetime
-import time
-import math
 import os
 
 
@@ -30,9 +27,6 @@ def evaluate(model, train_mat, test_mat, config, logger, device):
         user_emb = model.get_user_embs().cpu().data
         item_emb = model.get_item_embs().cpu().data
         
-        # user_emb = user_emb.cpu().data
-        # item_emb = item_emb.cpu().data
-        # ratings = torch.matmul(user_emb, item_emb.T)
         users = np.random.choice(user_num, min(user_num, 5000), False)
         evals = Eval()
         m = evals.evaluate_item(train_mat[users, :], test_mat[users, :], user_emb[users, :], item_emb, topk=50)
@@ -42,16 +36,17 @@ def evaluate(model, train_mat, test_mat, config, logger, device):
 
 # @profile
 def train_model(model, sampler, train_mat, test_mat, config, logger):
-    optimizer = utils_optim(config.learning_rate, model)
+    optimizer = utils_optim(config.learning_rate, config.weight_decay, model)
     scheduler = StepLR(optimizer, config.step_size, config.gamma)
     device = torch.device(config.device)
-    # sampler = two_phrases_sampler(user_emb,item_emb,config.sample_size,config.pool_size,config.num_neg)
 
     for epoch in range(config.epoch):
         sampler.zero_grad()
+        user_emb = model.get_user_embs()
+        item_emb = model.get_item_embs()
         if epoch % config.update_epoch < 1:
-            user_emb = model.get_user_embs()
-            item_emb = model.get_item_embs()
+            sampler.update_pool(user_emb, item_emb, cover_flag=True)
+        else:
             sampler.update_pool(user_emb, item_emb)
 
 
@@ -68,16 +63,14 @@ def train_model(model, sampler, train_mat, test_mat, config, logger):
             user_id, item_id = user_id.to(device), item_id.to(device)
             optimizer.zero_grad()
             
-            neg_id, prob_neg = sampler(user_id, config.random_flag)
+            neg_id, prob_neg = sampler(user_id, model=model)
             pos_rat, neg_rat = model(user_id, item_id, neg_id) 
 
             loss = model.loss_function(neg_rat, prob_neg, pos_rat, reduction=config.reduction, weighted=config.weighted)
             
-            # if (batch_idx % 20) == 0:
-                # logger.info("--Batch %d, loss : %.4f"%(batch_idx, loss.data))
+            
             loss_ += loss
             loss.backward()
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()
             
         
@@ -91,11 +84,11 @@ def train_model(model, sampler, train_mat, test_mat, config, logger):
             logger.info('***************Eval_Res : RECALL@5,10,50 %.6f, %.6f, %.6f'%(result['item_recall'][4], result['item_recall'][9], result['item_recall'][49]))
 
 
-def utils_optim(learning_rate, model):
+def utils_optim(learning_rate, weight_decay, model):
     if config.optim=='adam':
-        return torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0.01)
+        return torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     elif config.optim=='sgd':
-        return torch.optim.SGD(model.parameters(), lr=learning_rate, weight_decay=0.01)
+        return torch.optim.SGD(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     else:
         raise ValueError('Unkown optimizer!')
         
@@ -108,12 +101,9 @@ def main(config, logger=None):
     logging.info('The shape of datasets: %d, %d'%(user_num, item_num))
     
     model = BaseMF(user_num, item_num, config.dims)
-    sampler_list = [base_sampler, two_pass, two_pass_weight, two_pass_weight_pop, base_sampler_pop, two_pass_pop]
+    sampler_list = [base_sampler, two_pass, two_pass_weight, base_sampler_pop, two_pass_pop, two_pass_weight_pop, tapast, two_pass_discount]
     assert config.sampler < len(sampler_list), ValueError("Not supported sampler")
-    if config.sampler < 3:
-        sampler = sampler_list[config.sampler](user_num, item_num, config.sample_size, config.pool_size, config.sample_num, device)
-    else:
-        sampler = sampler_list[config.sampler](user_num, item_num, config.sample_size, config.pool_size, config.sample_num, device, train_mat)
+    sampler = sampler_list[config.sampler](user_num, item_num, config.sample_size, config.pool_size, config.sample_num, device, mat=train_mat)
 
     model = model.to(device)
     sampler = sampler.to(device)
@@ -144,9 +134,10 @@ if __name__ == "__main__":
     parser.add_argument('--reduction', default=False, type=bool, help='loss if reduction')
     parser.add_argument('--sample_size', default=200, type=int, help='the number of samples for importance sampling')
     parser.add_argument('--pool_size', default=50, type=int)
-    parser.add_argument('--update_epoch', default=1, type=int, help='the intervals to update the sample pool')
+    parser.add_argument('--update_epoch', default=10000, type=int, help='the intervals to update the sample pool')
     parser.add_argument('--weighted', action='store_true', help='whether weighted for the loss function')
-    parser.add_argument('--random_flag', action='store_true', help='uniform sample from the pool or multinomial')
+    parser.add_argument('--weight_decay', default=0.01, type=float, help='weight decay for the optimizer')
+    parser.add_argument('--anneal', default=0.001, type=float, help='the coefficient for the KL loss')
 
 
 

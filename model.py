@@ -168,7 +168,7 @@ class BaseMF_TS(BaseMF):
             # return self.reparameterize(self._User_Embedding.weight, self._User_Embedding_std.weight)
         return self._User_Embedding.weight
 
-    def get_item_embs(self,  eval_flag=True):
+    def get_item_embs(self, eval_flag=True):
         if eval_flag is True:
             return self._Item_Embedding.weight
         else:

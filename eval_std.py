@@ -4,21 +4,17 @@ import torch.nn.functional as F
 import torch.optim
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader
-# from two_pass_sampler import two_phrases_sampler
-from sampler import base_sampler, two_pass, two_pass_weight, two_pass_weight_pop
-from model import BaseMF, BaseModel, BaseMF_TS
+from sampler import base_sampler, two_pass, two_pass_weight, base_sampler_pop, two_pass_pop, two_pass_weight_pop, tapast, two_pass_discount
+from model import BaseMF, BaseMF_TS
 from dataloader import RecData, UserItemData
 import argparse
 import numpy as np
 from utils import Eval
-from cal_std import Eval as Eval2
 import utils
 import logging
 import scipy as sp
 import scipy.io
 import datetime
-import time
-import math
 import os
 
 
@@ -34,10 +30,7 @@ def evaluate(model, train_mat, test_mat, config, logger, device):
         users = np.random.choice(user_num, min(user_num, 5000), False)
         evals = Eval()
         m = evals.evaluate_item(train_mat[users, :], test_mat[users, :], user_emb[users, :], item_emb, topk=50)
-        
-        eeee = Eval2()
-        nn = eeee.evaluate_item(train_mat[users, :], test_mat[users, :], user_emb[users, :], item_emb)
-    return m, nn
+    return m
 
 
 
@@ -50,13 +43,13 @@ def train_model(model, sampler, train_mat, test_mat, config, logger):
 
     for epoch in range(config.epoch):
         sampler.zero_grad()
+        user_emb = model.get_user_embs()
+        item_emb = model.get_item_embs()
         if epoch % config.update_epoch < 1:
-            user_emb = model.get_user_embs(eval_flag=False)
-            item_emb = model.get_item_embs(eval_flag=False)
+            sampler.update_pool(user_emb, item_emb, cover_flag=True)
+        else:
             sampler.update_pool(user_emb, item_emb)
-        # print(sampler.is_pool, sampler.is_pool_weight)
-        # print(sampler.is_pool.shape, sampler.is_pool_weight.shape)
-
+        
         loss_ = 0.0
         kl_loss_ = 0.0
         logger.info("Epoch %d"%epoch)
@@ -71,7 +64,7 @@ def train_model(model, sampler, train_mat, test_mat, config, logger):
             user_id, item_id = user_id.to(device), item_id.to(device)
             optimizer.zero_grad()
             
-            neg_id, prob_neg = sampler(user_id, config.random_flag)
+            neg_id, prob_neg = sampler(user_id, model=model)
             pos_rat, neg_rat = model(user_id, item_id, neg_id) 
 
             loss, kl = model.loss_function(neg_rat, prob_neg, pos_rat, reduction=config.reduction, weighted=config.weighted, anneal=config.anneal)
@@ -80,9 +73,7 @@ def train_model(model, sampler, train_mat, test_mat, config, logger):
                 # logger.info("--Batch %d, loss : %.4f"%(batch_idx, loss.data))
             loss_ += loss
             kl_loss_ += kl
-            (loss + kl/math.exp(2 * epoch + 1)).backward()
-            # loss.backward()
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+            (loss + kl/(epoch + 1)).backward()
             optimizer.step()
             
         
@@ -91,11 +82,9 @@ def train_model(model, sampler, train_mat, test_mat, config, logger):
         scheduler.step()
 
         if (epoch % 10) == 0:
-            result, res_std = evaluate(model, train_mat, test_mat, config, logger, device)
+            result = evaluate(model, train_mat, test_mat, config, logger, device)
             logger.info('***************Eval_Res : NDCG@5,10,50 %.6f, %.6f, %.6f'%(result['item_ndcg'][4], result['item_ndcg'][9], result['item_ndcg'][49]))
             logger.info('***************Eval_Res : RECALL@5,10,50 %.6f, %.6f, %.6f'%(result['item_recall'][4], result['item_recall'][9], result['item_recall'][49]))
-            # print(res_std.mean(0))
-            logger.info(res_std.mean(0))
 
 
 def utils_optim(config, model):
@@ -116,17 +105,15 @@ def main(config, logger=None):
     
     # model = BaseMF(user_num, item_num, config.dims)
     model = BaseMF_TS(user_num, item_num, config.dims)
-    sampler_list = [base_sampler, two_pass, two_pass_weight, two_pass_weight_pop]
-    assert config.sampler < 4, ValueError("Not supported sampler")
-    if config.sampler < 3:
-        sampler = sampler_list[config.sampler](user_num, item_num, config.sample_size, config.pool_size, config.sample_num, device)
-    else:
-        sampler = sampler_list[config.sampler](user_num, item_num, config.sample_size, config.pool_size, config.sample_num, device, train_mat)
+    sampler_list = [base_sampler, two_pass, two_pass_weight, base_sampler_pop, two_pass_pop, two_pass_weight_pop, tapast, two_pass_discount]
+    assert config.sampler < len(sampler_list), ValueError("Not supported sampler")
+    sampler = sampler_list[config.sampler](user_num, item_num, config.sample_size, config.pool_size, config.sample_num, device, mat=train_mat)
 
     model = model.to(device)
     sampler = sampler.to(device)
     train_model(model, sampler, train_mat, test_mat, config, logger)
-    torch.save(model, 'model_ts_bpr.pkl')
+    # model_name = 'model_ts_bpr_%s.pkl'%config.data
+    # torch.save(model, model_name)
 
     return evaluate(model, train_mat, test_mat, config, logger, device)
 
@@ -153,9 +140,8 @@ if __name__ == "__main__":
     parser.add_argument('--reduction', default=False, type=bool, help='loss if reduction')
     parser.add_argument('--sample_size', default=200, type=int, help='the number of samples for importance sampling')
     parser.add_argument('--pool_size', default=50, type=int)
-    parser.add_argument('--update_epoch', default=1, type=int, help='the intervals to update the sample pool')
+    parser.add_argument('--update_epoch', default=10000, type=int, help='the intervals to update the sample pool')
     parser.add_argument('--weighted', action='store_true', help='whether weighted for the loss function')
-    parser.add_argument('--random_flag', action='store_true', help='uniform sample from the pool or multinomial')
     parser.add_argument('--anneal', default=0.001, type=float, help='the coefficient for the KL loss')
     parser.add_argument('--weight_decay', default=0.001, type=float, help='weight decay for the optimizer')
 
@@ -176,7 +162,7 @@ if __name__ == "__main__":
     logger.info(config)
     if config.fix_seed:
         utils.setup_seed(config.seed)
-    m, _ = main(config, logger)
+    m = main(config, logger)
     # print('ndcg@5,10,50, ', m['item_ndcg'][[4,9,49]])
 
     logger.info('Eval_Res : NDCG@5,10,50 %.6f, %.6f, %.6f'%(m['item_ndcg'][4], m['item_ndcg'][9], m['item_ndcg'][49]))

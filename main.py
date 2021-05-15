@@ -17,7 +17,6 @@ import scipy.io
 import datetime
 import os
 
-
 def evaluate(model, train_mat, test_mat, config, logger, device):
     logger.info("Start evaluation")
     model.eval()

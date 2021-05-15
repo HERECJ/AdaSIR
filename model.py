@@ -45,7 +45,7 @@ class BaseModel(nn.Module):
     def kl_loss(self, mu, log_var, anneal=1.0, reduction=False):
         pass
 
-    def loss_function(self, neg_rat, neg_prob, pos_rat, pos_prob=None, reduction=False, weighted=False):
+    def loss_function(self, neg_rat, neg_prob, pos_rat, pos_prob=None, reduction=False, weighted=False, **kwargs):
         """
             reduction : False the sum over the entries. True the average value
         """
@@ -151,14 +151,14 @@ class BaseMF_TS(BaseMF):
             return -anneal * 0.5 * torch.sum(torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim = 1), dim = 0)
     
 
-    def loss_function(self, neg_rat, neg_prob, pos_rat, pos_prob=None, reduction=False, weighted=False, anneal=0.01):
+    def loss_function(self, neg_rat, neg_prob, pos_rat, pos_prob=None, reduction=False, weighted=False, anneal=0.01, std_p=0.001, **kwargs):
         """
             reduction : False the sum over the entries. True the average value
         """
         batch_size = pos_rat.shape[0]
         loss0 = self.pair_wise_loss(pos_rat, neg_rat, neg_prob, reduction=reduction, weighted=weighted)
         # klloss = self.kl_loss(self._User_Embedding.weight, self._User_Embedding_std.weight, reduction=reduction) + self.kl_loss(self._Item_Embedding.weight, self._Item_Embedding_std.weight, reduction=reduction)
-        klloss = self.kl_loss(self._Item_Embedding.weight, self._Item_Embedding_std.weight, anneal=anneal, std_p=0.001, reduction=False)
+        klloss = self.kl_loss(self._Item_Embedding.weight, self._Item_Embedding_std.weight, anneal=anneal, std_p=std_p, reduction=False)
         return loss0 , klloss
 
     def get_user_embs(self, eval_flag=True):

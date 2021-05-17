@@ -36,7 +36,7 @@ class base_sampler_pop(base_sampler):
     
     def forward(self, user_id, **kwargs):
         batch_size = user_id.shape[0]
-        min_batch_size = min(1024, batch_size)
+        min_batch_size = min(4096, batch_size)
         cnt = batch_size // min_batch_size
         if (batch_size - cnt * min_batch_size) > 0:
             cnt += 1
@@ -136,6 +136,24 @@ class two_pass_pop(two_pass):
         items = torch.multinomial(self.pop_prob.repeat(batch_size,1), self.sample_size)
         return items, torch.log(self.pop_prob[items])
 
+class two_pass_rank(two_pass):
+    def __init__(self, num_users, num_items, sample_size, pool_size, num_neg, device, **kwargs):
+        super().__init__(num_users, num_items, sample_size, pool_size, num_neg, device, **kwargs)
+        self.candidate_items = torch.zeros(num_users, sample_size, device=self.device, dtype=torch.long)
+    
+    def update_pool(self, user_embs, item_embs, batch_size=2048, cover_flag=False, **kwargs):
+        num_batch = (self.num_users // batch_size) + 1
+        for ii in range(num_batch):
+            start_idx = ii * batch_size
+            end_idx = min(start_idx + batch_size, self.num_users)
+            user_batch = torch.arange(start_idx, end_idx, device=self.device)
+            user_embs_batch = user_embs[user_batch]
+    
+            neg_items, neg_q = self.sample_Q(user_batch)
+            self.candidate_items[user_batch] = neg_items
+            tmp_pool, tmp_score = self.re_sample(user_batch, user_embs_batch, item_embs, neg_items, neg_q)
+            self.__update_pool__(user_batch, tmp_pool, tmp_score, cover_flag=cover_flag)
+    
 class two_pass_discount(two_pass):
     """
         Update the pool with time discount
@@ -224,6 +242,24 @@ class two_pass_weight_pop(two_pass_weight):
         items = torch.multinomial(self.pop_prob.repeat(batch_size, 1), self.sample_size, replacement=True)
         return items, torch.log(self.pop_prob[items])
 
+class two_pass_weight_rank(two_pass_weight):
+    def __init__(self, num_users, num_items, sample_size, pool_size, num_neg, device, **kwargs):
+        super().__init__(num_users, num_items, sample_size, pool_size, num_neg, device, **kwargs)
+        self.candidate_items = torch.zeros(num_users, sample_size, device=self.device, dtype=torch.long)
+    
+    def update_pool(self, user_embs, item_embs, batch_size=2048, cover_flag=False, **kwargs):
+        num_batch = (self.num_users // batch_size) + 1
+        for ii in range(num_batch):
+            start_idx = ii * batch_size
+            end_idx = min(start_idx + batch_size, self.num_users)
+            user_batch = torch.arange(start_idx, end_idx, device=self.device)
+            user_embs_batch = user_embs[user_batch]
+    
+            neg_items, neg_q = self.sample_Q(user_batch)
+            self.candidate_items[user_batch] = neg_items
+            tmp_pool, tmp_score = self.re_sample(user_batch, user_embs_batch, item_embs, neg_items, neg_q)
+            self.__update_pool__(user_batch, tmp_pool, tmp_score, cover_flag=cover_flag)
+
 
 class tapast(base_sampler):
     def __init__(self, num_users, num_items, sample_size, pool_size, num_neg, device, **kwargs):
@@ -265,7 +301,7 @@ if __name__ == '__main__':
 
     dim = 32
 
-    epoch = 200
+    epoch = 10000
 
     user_emb = torch.randn(user_num, dim, device=device)
     item_emb = torch.randn(item_num, dim, device=device)
@@ -300,4 +336,4 @@ if __name__ == '__main__':
     t1 = time.time()
     print("running time", t1 - t0)
 
-    # plot_probs(orig_dis, count_freq)
+    plot_probs(orig_dis, count_freq)

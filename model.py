@@ -1,4 +1,5 @@
 import torch
+from torch._C import device
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -56,7 +57,7 @@ class BaseModel(nn.Module):
         else:
             raise ValueError('%d, Not supported loss mode'%self.loss_mode)
     
-    def pair_wise_loss(self, pos_rat, neg_rat, neg_prob, reduction=False, weighted=False):
+    def pair_wise_loss(self, pos_rat, neg_rat, neg_prob, reduction=False, weighted=False, pos_rank=None):
         # shape of pos_rat (B,), neg_rat (B,M)
         pred = torch.subtract(pos_rat.unsqueeze(1), neg_rat)
         
@@ -92,6 +93,9 @@ class BaseMF(BaseModel):
         # nn.init.normal_(self._User_Embedding.weight, mean=0, std=0.1)
         self._Item_Embedding = nn.Embedding(self.num_item, self.dims)
         # nn.init.normal_(self._Item_Embedding.weight, mean=0, std=0.1)
+        self._rank_weight_pre = torch.tensor([self.cal_n(x) if x > 1 else 1 for x in range(self.num_item + 1)])
+        # print(self._rank_weight_pre)
+        # import pdb;pdb.set_trace()
 
     def forward(self, user_id, pos_id, neg_id):
         '''
@@ -114,7 +118,53 @@ class BaseMF(BaseModel):
         user_emb = self._User_Embedding(user_id)
         item_emb = self._Item_Embedding(item_id)
         return (user_emb.unsqueeze(-2) * item_emb).sum(-1)
+    
+    def est_rank(self, user_id, pos_rat, candidate_items, sample_size):
+        # (rank - 1)/N = (est_rank - 1)/sample_size
+        candidate_rat = self.inference(user_id, candidate_items)
+        sorted_seq, _ = torch.sort(candidate_rat)
+        quick_r = torch.searchsorted(sorted_seq, pos_rat.unsqueeze(-1))
+        r = ((quick_r) * (self.num_item - 1 ) / sample_size ).floor().long()
+        # r = ((quick_r) * (self.num_item - 1 ) / sample_size ).floor()
+        return r, self._rank_weight_pre[r]
+        # return r
+        # return torch.log(r + 1)
+    
+    def cal_rank(self, user_id, pos_rat):
+        item_emb = self._Item_Embedding.weight
+        user_emb = self._User_Embedding(user_id)
+        all_rat = torch.matmul(user_emb, item_emb.T)
+        sorted_seq, _ = torch.sort(all_rat)
+        cal_r = torch.searchsorted(sorted_seq, pos_rat.unsqueeze(-1))
+        return cal_r
 
+    
+    def cal_n(self,n):
+        vec = 1 / torch.arange(0,n)
+        return vec[1:].sum()
+
+
+    def loss_function(self, neg_rat, neg_prob, pos_rat, pos_prob=None, reduction=False, weighted=False, pos_rank=None, **kwargs):
+
+            # return self.pair_wise_loss(pos_rat, neg_rat, neg_prob, reduction=reduction, weighted=weighted)
+        
+        pred = torch.subtract(pos_rat.unsqueeze(1), neg_rat)
+        if weighted:
+            # 这边计算有问题，和原来的不一样，这里面用的是基于重要性采样的，但是实际上应该用采样器返回的概率
+            importance = F.softmax(torch.negative(pred) - neg_prob, dim=1)
+        else:
+            importance = F.softmax(torch.ones_like(pred), dim=1)
+        
+        if pos_rank is not None:
+            importance = importance * pos_rank
+
+        weight_loss = torch.multiply(importance.detach(), torch.negative(F.logsigmoid(pred)))
+        if reduction:
+            return torch.sum(weight_loss, dim=-1).mean(-1)
+        else:
+            return torch.sum(weight_loss, dim=-1).sum(-1)
+        
+    
 
 class BaseMF_TS(BaseMF):
     def __init__(self, num_user, num_item, dims, loss_mode=2, **kwargs):

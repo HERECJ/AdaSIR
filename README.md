@@ -20,7 +20,8 @@ The codes are tested in Pytorch
     + 8: DNS
     + 9: Adaptive kernel(only works for matrix factorization)
 
-++ Running Example
+## Running Example
+
 `python main_more.py --sampler 0 --weighted` for PRIS(U)
 
 `python main_more.py --sampler 2 --weighted` for AdaSIR

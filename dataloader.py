@@ -52,6 +52,7 @@ class RecData(object):
         return train_mat, test_mat
 
 
+
 class UserItemData(Dataset):
     def __init__(self, train_mat, train_flag=True):
         super(UserItemData, self).__init__()

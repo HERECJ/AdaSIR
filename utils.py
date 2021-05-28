@@ -1,14 +1,14 @@
 # this provides some basic utilities, such as matrix split, read file into a matrix
 
+from operator import mod
 import scipy as sp
 import scipy.sparse as ss
 import scipy.io as sio
-import random
 import numpy as np
 from typing import List
 import logging
 import torch
-import math
+
 
 
 
@@ -46,19 +46,19 @@ def setup_seed(seed):
 
 class Eval:
     @staticmethod
-    def evaluate_item(train:ss.csr_matrix, test:ss.csr_matrix, user:np.ndarray, item:np.ndarray, topk:int=50, cutoff:int=50):
+    def evaluate_item(train, test, user_id, model, device, topk=50, cutoff=50):
         train = train.tocsr()
         test = test.tocsr()
         idx = np.squeeze((test.sum(axis=1) > 0).A)
         train = train[idx, :]
         test = test[idx, :]
-        user = user[idx, :]
+        user = user_id[idx]
         N = train.shape[1]
         cand_count = N - train.sum(axis=1)
         if topk <0:
-            mat_rank = Eval.predict(train, test, user, item)
+            mat_rank = Eval.predict(train, test, user, model, device)
         else:
-            mat_rank = Eval.topk_search_(train, test, user, item, topk)
+            mat_rank = Eval.topk_search_(train, test, user, model, device, topk)
         return Eval.compute_item_metric(test, mat_rank, cand_count, cutoff)
 
     @staticmethod
@@ -180,14 +180,18 @@ class Eval:
         return Eval.compute_item_metric(test, mat_rank, cand_count, cutoff)
 
     @staticmethod
-    def topk_search(train:ss.csr_matrix, user:np.ndarray, item:np.ndarray, topk:int=200)->np.ndarray:
+    def topk_search(train, user, model, device, topk=200):
+    # def topk_search(train:ss.csr_matrix, user:np.ndarray, item:np.ndarray, topk:int=200)->np.ndarray:
         train = train.tocsr()
-        M, _ = train.shape
-        item_t = item.T
+        M, N = train.shape
+        item_id = torch.arange(0,N, device=device).unsqueeze(0)
         result = np.zeros((M, topk), dtype=np.int)
         for i in range(M):
             E = train.indices[train.indptr[i]:train.indptr[i+1]]
-            pred = np.matmul(user[i,:], item_t)
+            uid = torch.LongTensor([user[i]]).to(device)
+            # pred = np.matmul(U, item_t)  huan
+            pred = np.squeeze(model.inference(uid.repeat(1,N), item_id).cpu().numpy())
+            # pred = np.matmul(user[i,:], item_t) huan
             #pred = np.tensordot(user[i,:], item, [0,-1])
             pred[E] = -np.inf
             idx = np.argpartition(pred, -topk)[-topk:]
@@ -195,11 +199,12 @@ class Eval:
         return result
 
     @staticmethod
-    def topk_search_(train:ss.csr_matrix, test:ss.csr_matrix, user:np.ndarray, item:np.ndarray, topk:int=200)->ss.csr_matrix:
+    def topk_search_(train, test, user, model, device, topk=200):
+    # def topk_search_(train:ss.csr_matrix, test:ss.csr_matrix, user:np.ndarray, item:np.ndarray, topk:int=200)->ss.csr_matrix:
         M, _ = train.shape
         #traind = [train.indices[train.indptr[i]:train.indptr[i + 1]].tolist() for i in range(M)]
         #result = uts.topk_search(traind, user, item, topk).reshape([M, topk])
-        result = Eval.topk_search(train, user, item, topk)
+        result = Eval.topk_search(train, user, model, device, topk)
         uir = []
         for i in range(M):
             R = set(test.indices[test.indptr[i]:test.indptr[i+1]])
@@ -215,15 +220,17 @@ class Eval:
         #return mat_rank.multiply(test !=0)
 
     @staticmethod
-    def predict(train:ss.csr_matrix, test:ss.csr_matrix, user:np.ndarray, item:np.ndarray)->ss.csr_matrix:
-        M, _ = train.shape
-        item_t = item.T
+    def predict(train, test, user, model, device):
+        M, N = train.shape
         full_rank = np.zeros_like(test.data)
+        item_id = torch.arange(0,N, device=device).unsqueeze(0)
         for i in range(M):
             E = train.indices[train.indptr[i]:train.indptr[i+1]]
             R = test.indices[test.indptr[i]:test.indptr[i+1]]
-            U = user[i,:]
-            pred = np.matmul(U, item_t)
+            # U = user[i,:]
+            uid = torch.LongTensor([user[i]]).to(device)
+            # pred = np.matmul(U, item_t)  huan
+            pred = np.squeeze(model.inference(uid.repeat(1,N), item_id).cpu().numpy())
             pred[E] = -np.inf
             idx = np.argsort(-pred)
             rank = np.zeros_like(idx)

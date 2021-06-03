@@ -13,10 +13,10 @@ The codes are tested in Pytorch
     + 3: MLP
 + sampler
     + 0: uniform
-    + 2: AdaIR uniform
+    + 2: AdaSIR uniform
     + 3: popularity
-    + 5: AdaIR pop
-    + 7: AdaIR uniform + rank estimation
+    + 5: AdaSIR pop
+    + 7: AdaSIR uniform + rank estimation
     + 8: DNS
     + 9: Adaptive kernel(only works for matrix factorization)
 

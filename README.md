@@ -1,4 +1,5 @@
-# The code for AdaSIR
+Implementation for AdaSIR
+"Learning Recommenders for Implicit Feedback with Importance Resampling" (WWW2022)
 The codes are tested in Pytorch
 
 ## Parameters
